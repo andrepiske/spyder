@@ -1,3 +1,4 @@
+[![Gem Version](https://badge.fury.io/rb/spyder.svg)](https://badge.fury.io/rb/spyder)
 
 # Easy web server
 
