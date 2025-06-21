@@ -4,6 +4,7 @@ module Spyder
   class Response
     attr_reader :code
     attr_accessor :body
+    attr_accessor :hijack
     attr_reader :headers
     attr_writer :reason_sentence
 
@@ -60,8 +61,10 @@ module Spyder
       ]
     end.freeze
 
-    def initialize
-      self.code = :ok
+    def initialize(code: :ok)
+      @body = nil
+      @hijack = false
+      self.code = code
       @headers = HeaderStore.new(:response)
     end
 

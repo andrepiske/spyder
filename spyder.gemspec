@@ -21,4 +21,7 @@ Gem::Specification.new do |s|
   # s.add_runtime_dependency 'msgpack', '~> 1.3'
   # s.add_runtime_dependency 'connection_pool', '>= 2.2.2', '< 3'
   # s.add_runtime_dependency 'concurrent-ruby', '~> 1.1.6'
+
+  # spyder-web dependencies:
+  s.add_runtime_dependency 'marcel', '~> 1.0'
 end

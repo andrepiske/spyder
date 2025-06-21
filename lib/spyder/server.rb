@@ -4,8 +4,9 @@ module Spyder
   class Server
     attr_accessor :router
 
-    def initialize(bind, port, router: Router.new, max_threads: 4)
+    def initialize(bind, port, router: Router.new, max_threads: 4, tcp_backlog: 10)
       @server = TCPServer.new(bind, port)
+      @tcp_backlog = tcp_backlog
       @max_threads = max_threads
       @middleware = []
       @threads = []
@@ -13,49 +14,54 @@ module Spyder
       @router = router
     end
 
-    def add_middleware(callable, args)
+    def add_middleware(callable, args=[])
       @middleware << [callable, args]
     end
 
     def start
-      @server.listen(10)
+      busy_threads = 0
+      @server.listen(@tcp_backlog)
+
       loop do
-        client = @server.accept
-
-        app_thread = Thread.new do
-          error = nil
-          begin
-            process_new_client(client)
-          rescue Exception => e
-            error = e
+        time_start = Process.clock_gettime(:CLOCK_MONOTONIC, :float_second)
+        loop do
+          current_busy = @tp_sync.synchronize { busy_threads }
+          break if current_busy < @max_threads
+          sleep(0)
+          current_time = Process.clock_gettime(:CLOCK_MONOTONIC, :float_second)
+          if (current_time - time_start) > 1.0
+            # puts "Waiting a long time: #{(current_time - time_start)}"
+            sleep 0.2
           end
-
-          if error
-            puts error.full_message
-
-            response = Response.make_generic :internal_server_error
-            dispatch_response(client, response)
-          end
-
-          client.close rescue nil
         end
 
-        over_capacity = true
-        added_thread_to_list = false
-        while over_capacity
-          @tp_sync.synchronize do
-            unless added_thread_to_list
-              @threads << app_thread
-              added_thread_to_list = true
+        client = @server.accept
+        @tp_sync.synchronize { busy_threads += 1 }
+
+        Thread.new do
+          begin
+            error, response = nil
+            begin
+              response = process_new_client(client)
+            rescue Exception => e
+              error = e
             end
-            over_capacity = (@threads.length >= @max_threads)
-            # puts("#{@threads.length} of #{@max_threads}")
 
-            @threads.delete_if { |t| !t.alive? }
+            if error
+              puts error.full_message
+
+              response = Response.make_generic :internal_server_error
+              dispatch_response(client, response)
+            end
+
+            if response&.hijack
+              response.hijack.call(client)
+            else
+              client.close rescue nil
+            end
+          ensure
+            @tp_sync.synchronize { busy_threads -= 1 }
           end
-
-          # puts("XXX OVER CAPACITY!") if over_capacity
-          sleep 0 if over_capacity
         end
       end
     end
@@ -97,22 +103,30 @@ module Spyder
       content_length = response.headers.dict['content-length']
       if !content_length && response.body && response.body.is_a?(String)
         content_length = response.body.length
+        response.set_header 'content-length', content_length.to_s
       end
 
-      socket.write("HTTP/1.1 #{response.code} #{response.reason_sentence.b}\r\n")
-      response.headers.ordered.each do |name, value|
-        socket.write("#{name.b}: #{value.b}\r\n")
-      end
-      socket.write("connection: close\r\n") # FIXME:
-      socket.write("content-length: #{content_length}\r\n") if content_length
-      socket.write("\r\n")
+      response.set_header('connection', 'close') unless response.headers.dict['connection']
 
-      if response.body
-        Array(response.body).each do |part|
-          content = part.respond_to?(:call) ? part.call : part
-          socket.write(content.b)
+      begin
+        socket.write("HTTP/1.1 #{response.code} #{response.reason_sentence.b}\r\n")
+        response.headers.ordered.each do |name, value|
+          socket.write("#{name.b}: #{value.b}\r\n")
         end
+        socket.write("\r\n")
+
+        if response.body
+          Array(response.body).each do |part|
+            content = part.respond_to?(:call) ? part.call : part
+            socket.write(content.b)
+          end
+        end
+      rescue Errno::EPIPE
+        # socket closed. So what?
+        socket.close rescue nil
       end
+
+      response
     end
 
     def read_line(socket)
